@@ -3,6 +3,7 @@ import sys
 import json
 import logging
 import logging.config
+import logging.handlers
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -22,37 +23,44 @@ ensure_directories()
 # 2. Environment‑aware logging setup
 # ============================================================
 def setup_logging():
-    """Configure logging based on environment (local vs cloud)."""
-    # Check if running on Render (or any cloud platform)
-    is_cloud = os.getenv("RENDER") == "true" or os.getenv("DYNO")  # Heroku
+    """
+    Configure logging based on environment (local vs cloud).
+    - Cloud (Render, Heroku): console logging only (stdout).
+    - Local: rotating file logging + console.
+    """
+    # Detect cloud environment
+    is_cloud = os.getenv("RENDER") == "true" or os.getenv("DYNO") is not None
 
-    # Basic config for cloud: only console output
     if is_cloud:
+        # Cloud mode: only console output (platforms capture stdout)
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[logging.StreamHandler(sys.stdout)]
         )
-        # Also create a logger for the bot
         logger = logging.getLogger("brickbot")
         logger.info("Running in cloud mode – console logging only.")
         return
 
-    # Local development: use rotating file + console
+    # Local development: try to load logging.conf
     try:
-        # Try to load the config file
-        logging.config.fileConfig("logging.conf", disable_existing_loggers=False)
-        logger = logging.getLogger("brickbot")
-        logger.info("Running in local mode – file logging enabled.")
+        if os.path.exists("logging.conf"):
+            logging.config.fileConfig("logging.conf", disable_existing_loggers=False)
+            logger = logging.getLogger("brickbot")
+            logger.info("Running in local mode – using logging.conf.")
+        else:
+            raise FileNotFoundError("logging.conf not found")
     except Exception as e:
-        # Fallback if logging.conf is missing or invalid
+        # Fallback: programmatic configuration
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[
                 logging.StreamHandler(sys.stdout),
                 logging.handlers.RotatingFileHandler(
-                    "data/logs/brickbot.log", maxBytes=10485760, backupCount=5
+                    "data/logs/brickbot.log",
+                    maxBytes=10485760,
+                    backupCount=5
                 )
             ]
         )
@@ -64,6 +72,11 @@ def setup_logging():
 # ============================================================
 load_dotenv()
 
+# Verify token is set
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_TOKEN not set in .env")
+
 with open("config.json") as f:
     CONFIG = json.load(f)
 
@@ -74,19 +87,24 @@ class BrickBot:
     """Main bot class."""
 
     def __init__(self):
-        self.token = os.getenv("TELEGRAM_TOKEN")
-        if not self.token:
-            raise ValueError("TELEGRAM_TOKEN not set in .env")
-
+        self.token = TOKEN
         self.config = CONFIG
         self.discord_webhook = os.getenv("DISCORD_WEBHOOK_URL")
-        self.admin_ids = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+        self.admin_ids = [
+            int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()
+        ]
 
         # Build application
         self.app = Application.builder().token(self.token).build()
 
         # Register handlers
         self._register_handlers()
+
+        # Set up post-init hook
+        self.app.post_init = self._on_startup
+
+        # Error handler
+        self.app.add_error_handler(self._error_handler)
 
     def _register_handlers(self):
         """Register all command and message handlers."""
@@ -97,7 +115,7 @@ class BrickBot:
         from handlers.support import SupportHandlers, get_conversation_handler
         from handlers.utility import UtilityHandlers
 
-        # Basic commands
+        # ─── Basic commands ──────────────────────────────
         self.app.add_handler(CommandHandler("start", BasicHandlers.start))
         self.app.add_handler(CommandHandler("help", BasicHandlers.help_command))
         self.app.add_handler(CommandHandler("ping", BasicHandlers.ping))
@@ -105,11 +123,11 @@ class BrickBot:
         self.app.add_handler(CommandHandler("userinfo", BasicHandlers.userinfo))
         self.app.add_handler(CommandHandler("about", BasicHandlers.about))
 
-        # Community
+        # ─── Community ────────────────────────────────────
         self.app.add_handler(CommandHandler("setwelcome", CommunityHandlers.set_welcome))
         self.app.add_handler(CommandHandler("setgoodbye", CommunityHandlers.set_goodbye))
 
-        # Moderation (premium)
+        # ─── Premium: Moderation ─────────────────────────
         if self.config.get("premium", {}).get("enabled", False):
             self.app.add_handler(CommandHandler("warn", ModerationHandlers.warn))
             self.app.add_handler(CommandHandler("warnings", ModerationHandlers.warnings))
@@ -119,17 +137,21 @@ class BrickBot:
             self.app.add_handler(CommandHandler("unban", ModerationHandlers.unban))
             self.app.add_handler(CommandHandler("clear", ModerationHandlers.clear))
 
-        # Auto-moderation (premium)
+        # ─── Premium: Auto-moderation ────────────────────
         if self.config.get("premium", {}).get("enabled", False):
-            self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, AutoModHandlers.check_message))
+            self.app.add_handler(
+                MessageHandler(filters.TEXT & ~filters.COMMAND, AutoModHandlers.check_message)
+            )
 
-        # Support (premium)
+        # ─── Premium: Support ────────────────────────────
         if self.config.get("premium", {}).get("enabled", False):
             self.app.add_handler(CommandHandler("faq", SupportHandlers.faq))
-            self.app.add_handler(CallbackQueryHandler(SupportHandlers.faq_callback, pattern="^faq_"))
+            self.app.add_handler(
+                CallbackQueryHandler(SupportHandlers.faq_callback, pattern="^faq_")
+            )
             self.app.add_handler(get_conversation_handler())
 
-        # Utility (premium)
+        # ─── Premium: Utility ────────────────────────────
         if self.config.get("premium", {}).get("enabled", False):
             self.app.add_handler(CommandHandler("poll", UtilityHandlers.poll))
             self.app.add_handler(CommandHandler("remind", UtilityHandlers.remind))
@@ -140,47 +162,57 @@ class BrickBot:
             self.app.add_handler(CommandHandler("coinflip", UtilityHandlers.coinflip))
             self.app.add_handler(CommandHandler("timestamp", UtilityHandlers.timestamp))
 
-        # Error handler
-        self.app.add_error_handler(self._error_handler)
-
-        # Start-up notification
-        self.app.post_init = self._on_startup
-
     async def _on_startup(self, application):
         """Send startup notification to Discord webhook."""
-        if self.discord_webhook:
-            from utils.discord_webhook import send_discord_webhook
-            await send_discord_webhook(
-                self.discord_webhook,
-                "🟢 BrickBot started",
-                f"Version: {self.config['bot']['version']}"
-            )
         logger = logging.getLogger("brickbot")
-        logger.info("BrickBot started")
+        logger.info("BrickBot started successfully.")
+
+        if self.discord_webhook:
+            try:
+                from utils.discord_webhook import send_discord_webhook
+                await send_discord_webhook(
+                    self.discord_webhook,
+                    "🟢 BrickBot started",
+                    f"Version: {self.config['bot']['version']}"
+                )
+            except Exception as e:
+                logger.warning(f"Could not send Discord startup notification: {e}")
 
     async def _error_handler(self, update, context):
-        """Global error handler."""
+        """Global error handler for the bot."""
         logger = logging.getLogger("brickbot")
         logger.error(f"Error: {context.error}")
+
         if update and update.effective_message:
-            await update.effective_message.reply_text("❌ An error occurred. Please try again later.")
+            try:
+                await update.effective_message.reply_text(
+                    "❌ An error occurred. Please try again later."
+                )
+            except Exception:
+                pass
 
     def run(self):
-        """Start the bot."""
+        """Start the bot with polling."""
         logger = logging.getLogger("brickbot")
-        logger.info("Starting BrickBot...")
-        self.app.run_polling()
+        logger.info("Starting BrickBot polling...")
+
+        # drop_pending_updates=True prevents conflict errors and discards old updates
+        self.app.run_polling(drop_pending_updates=True)
 
 
+# ============================================================
+# 5. Entry Point
+# ============================================================
 if __name__ == "__main__":
+    # Setup logging first
     setup_logging()
+    logger = logging.getLogger("brickbot")
+
     try:
         bot = BrickBot()
         bot.run()
     except KeyboardInterrupt:
-        logger = logging.getLogger("brickbot")
         logger.info("Bot stopped by user")
     except Exception as e:
-        logger = logging.getLogger("brickbot")
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
