@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import logging
 import logging.config
@@ -7,18 +8,68 @@ from pathlib import Path
 from dotenv import load_dotenv
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler
 
-# Load environment
+# ============================================================
+# 1. Ensure required directories exist
+# ============================================================
+def ensure_directories():
+    """Create necessary directories for logs and database."""
+    Path("data/logs").mkdir(parents=True, exist_ok=True)
+    Path("data").mkdir(parents=True, exist_ok=True)
+
+ensure_directories()
+
+# ============================================================
+# 2. Environment‑aware logging setup
+# ============================================================
+def setup_logging():
+    """Configure logging based on environment (local vs cloud)."""
+    # Check if running on Render (or any cloud platform)
+    is_cloud = os.getenv("RENDER") == "true" or os.getenv("DYNO")  # Heroku
+
+    # Basic config for cloud: only console output
+    if is_cloud:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[logging.StreamHandler(sys.stdout)]
+        )
+        # Also create a logger for the bot
+        logger = logging.getLogger("brickbot")
+        logger.info("Running in cloud mode – console logging only.")
+        return
+
+    # Local development: use rotating file + console
+    try:
+        # Try to load the config file
+        logging.config.fileConfig("logging.conf", disable_existing_loggers=False)
+        logger = logging.getLogger("brickbot")
+        logger.info("Running in local mode – file logging enabled.")
+    except Exception as e:
+        # Fallback if logging.conf is missing or invalid
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                logging.handlers.RotatingFileHandler(
+                    "data/logs/brickbot.log", maxBytes=10485760, backupCount=5
+                )
+            ]
+        )
+        logger = logging.getLogger("brickbot")
+        logger.warning(f"Could not load logging.conf, using fallback config: {e}")
+
+# ============================================================
+# 3. Load environment and config
+# ============================================================
 load_dotenv()
 
-# Load config
 with open("config.json") as f:
     CONFIG = json.load(f)
 
-# Setup logging
-logging.config.fileConfig("logging.conf")
-logger = logging.getLogger(__name__)
-
-
+# ============================================================
+# 4. Main Bot Class
+# ============================================================
 class BrickBot:
     """Main bot class."""
 
@@ -104,25 +155,32 @@ class BrickBot:
                 "🟢 BrickBot started",
                 f"Version: {self.config['bot']['version']}"
             )
+        logger = logging.getLogger("brickbot")
         logger.info("BrickBot started")
 
     async def _error_handler(self, update, context):
         """Global error handler."""
+        logger = logging.getLogger("brickbot")
         logger.error(f"Error: {context.error}")
         if update and update.effective_message:
             await update.effective_message.reply_text("❌ An error occurred. Please try again later.")
 
     def run(self):
         """Start the bot."""
+        logger = logging.getLogger("brickbot")
         logger.info("Starting BrickBot...")
         self.app.run_polling()
 
 
 if __name__ == "__main__":
+    setup_logging()
     try:
         bot = BrickBot()
         bot.run()
     except KeyboardInterrupt:
+        logger = logging.getLogger("brickbot")
         logger.info("Bot stopped by user")
     except Exception as e:
+        logger = logging.getLogger("brickbot")
         logger.error(f"Fatal error: {e}")
+        sys.exit(1)
