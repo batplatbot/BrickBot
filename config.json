@@ -1,0 +1,38 @@
+{
+  "bot": {
+    "name": "BrickBot",
+    "version": "1.0.0",
+    "description": "Community management bot for Telegram"
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  },
+  "database": {
+    "path": "data/brickbot.db"
+  },
+  "cooldowns": {
+    "default": 3,
+    "moderation": 5
+  },
+  "premium": {
+    "enabled": true
+  },
+  "welcome": {
+    "default_message": "Welcome {user} to {group}!",
+    "default_embed_color": "#5865F2"
+  },
+  "goodbye": {
+    "default_message": "{user} has left {group}.",
+    "default_embed_color": "#ED4245"
+  },
+  "auto_mod": {
+    "spam_threshold": 5,
+    "spam_window": 5,
+    "mention_threshold": 3,
+    "mention_window": 5
+  },
+  "support": {
+    "faq_channel": null
+  }
+}
